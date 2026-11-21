@@ -1,10 +1,14 @@
 """The per-video CrewAI Flow.
 
     load_video ──► prepare_transcript ──► generate_pack ──► save_outputs
-   (YouTube +       (timestamps,           (Coach + Reviewer   (txt / md / pdf /
-    cache)           condense if long)      crew, revise once)   notion, metadata)
+   (YouTube +       (English text:          (Coach + Reviewer   (txt / md / pdf /
+    cache)           translate Hindi subs,   crew, revise once)   notion, metadata)
+                     or Gemini transcribes
+                     if no subtitles;
+                     condense if long)
 
-Only ``generate_pack`` (and condensing very long transcripts) uses the LLM.
+The LLM is used to get clean English text (only when the subtitles are not
+English), to condense very long transcripts and to write the study pack.
 Everything else is plain, deterministic Python.
 """
 
@@ -24,8 +28,19 @@ from .cache import Cache, dump_json
 from .config import PROMPT_VERSION, Settings
 from .exporters import export_notion, export_pdf
 from .models import RunStats, StudyPack, Transcript, VideoMeta, VideoResult
+from .retry import with_retry
 from .storage import atomic_write_text, safe_name, video_folder
-from .youtube import fetch_metadata, fetch_transcript, fmt_ts, parse_video_id, split_blocks, timestamped_text
+from .transcribe import transcribe_video
+from .translate import translate_transcript
+from .youtube import (
+    SubtitlesNotFound,
+    fetch_metadata,
+    fetch_transcript,
+    fmt_ts,
+    parse_video_id,
+    split_blocks,
+    timestamped_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +53,10 @@ class PrepState(BaseModel):
     output_parent: str = ""
     folder_prefix: str = ""
     meta: VideoMeta | None = None
-    transcript: Transcript | None = None
+    transcript: Transcript | None = None  # original subtitles (None if the video has none)
+    english: Transcript | None = None  # what the agents read
+    transcript_note: str = ""
+    prep_tokens: int = 0
     llm_text: str = ""
     condensed: bool = False
     pack: StudyPack | None = None
@@ -50,7 +68,8 @@ class GenerationError(RuntimeError):
     pass
 
 
-def run_crew(settings: Settings, meta: VideoMeta, llm_text: str, progress: Progress) -> tuple[StudyPack, RunStats]:
+def run_crew(settings: Settings, meta: VideoMeta, llm_text: str, progress: Progress,
+             transcript_note: str = "") -> tuple[StudyPack, RunStats]:
     """Run the Coach + Reviewer crew, with one revision round if the review is poor."""
     from .crew import SummaryCrew
 
@@ -60,14 +79,18 @@ def run_crew(settings: Settings, meta: VideoMeta, llm_text: str, progress: Progr
     for attempt in range(settings.max_revisions + 1):
         progress("Coach is writing the summaries and Q&A..." if attempt == 0
                  else "Coach is revising based on reviewer feedback...")
-        crew = SummaryCrew(model=settings.model, verbose=settings.verbose).crew()
-        out = crew.kickoff(inputs={
+        inputs = {
             "title": meta.title,
             "channel": meta.channel or "unknown channel",
             "duration": fmt_ts(meta.duration_seconds) if meta.duration_seconds else "unknown",
             "transcript": llm_text,
             "revision_notes": notes,
-        })
+            "transcript_note": transcript_note,
+        }
+        out = with_retry(
+            lambda inputs=inputs: SummaryCrew(model=settings.model, verbose=settings.verbose)
+            .crew().kickoff(inputs=inputs),
+            "the summaries", progress)
         _add_usage(stats, out.token_usage)
         results = [t.pydantic for t in out.tasks_output]
         if len(results) != 4 or any(r is None for r in results):
@@ -122,19 +145,29 @@ class InterviewPrepFlow(Flow[PrepState]):
         video_id = parse_video_id(s.url)
         cached = None if s.force else self.cache.get_transcript(video_id)
         if cached:
-            self._progress("Using cached subtitles.")
+            self._progress("Using cached video details and subtitles.")
             s.meta, s.transcript = cached.meta, cached.transcript
             return
         self._progress("Reading video details...")
         s.meta = fetch_metadata(video_id)
-        self._progress(f"Downloading English subtitles for “{s.meta.title}”...")
-        s.transcript = fetch_transcript(video_id)
+        self._progress(f"Downloading subtitles for “{s.meta.title}”...")
+        try:
+            s.transcript = fetch_transcript(video_id, source_languages=self._settings.subtitle_languages)
+        except SubtitlesNotFound as e:
+            self._progress(str(e))
+            s.transcript = None
         self.cache.put_transcript(s.meta, s.transcript)
 
     @listen(load_video)
     def prepare_transcript(self) -> None:
         s, cfg = self.state, self._settings
-        text = timestamped_text(s.transcript.segments)
+        s.english = self._english_transcript()
+        if s.english.translated_from or s.english.source == "ai_transcription":
+            s.transcript_note = (
+                f"NOTE: this transcript was produced from {s.english.describe()}. It was cleaned up, but a few "
+                "words may still be wrong. Rely on the technical meaning that fits the topic, not on odd wording."
+            )
+        text = timestamped_text(s.english.segments)
         if len(text) > cfg.max_transcript_chars:
             from .crew import condense_chunk
 
@@ -146,6 +179,31 @@ class InterviewPrepFlow(Flow[PrepState]):
             text, s.condensed = "\n".join(notes), True
         s.llm_text = text
 
+    def _english_transcript(self) -> Transcript:
+        """English subtitles as-is; otherwise translate them, or transcribe the audio if there are none."""
+        s, cfg = self.state, self._settings
+        if s.transcript is not None and s.transcript.is_english:
+            return s.transcript
+        if s.transcript is None and not cfg.transcribe_fallback:
+            raise SubtitlesNotFound(
+                f"“{s.meta.title}” has no subtitles. Enable TRANSCRIBE_FALLBACK to let Gemini transcribe it."
+            )
+        # Translations / transcriptions are cached per model, so they are only paid for once.
+        model = cfg.model if s.transcript is not None else cfg.transcribe_model
+        cached = None if s.force else self.cache.get_english(s.meta.video_id, model, PROMPT_VERSION)
+        if cached:
+            self._progress("Using cached English transcript.")
+            return cached
+        if s.transcript is not None:
+            english, s.prep_tokens = translate_transcript(
+                s.transcript, s.meta, cfg.model, chunk_chars=cfg.translate_chunk_chars, progress=self._progress)
+        else:
+            english, s.prep_tokens = transcribe_video(
+                s.meta, cfg.transcribe_model, cfg.transcribe_window_seconds, progress=self._progress)
+        self._progress(f"English transcript ready ({len(english.segments)} passages).")
+        self.cache.put_english(s.meta.video_id, model, PROMPT_VERSION, english)
+        return english
+
     @listen(prepare_transcript)
     def generate_pack(self) -> None:
         s, cfg = self.state, self._settings
@@ -156,10 +214,12 @@ class InterviewPrepFlow(Flow[PrepState]):
             s.stats = cached.stats.model_copy(update={"from_cache": True, "seconds": 0.0})
             return
         t0 = time.perf_counter()
-        s.pack, stats = self._crew_runner(cfg, s.meta, s.llm_text, self._progress)
+        s.pack, stats = self._crew_runner(cfg, s.meta, s.llm_text, self._progress,
+                                          transcript_note=s.transcript_note)
         stats.seconds = round(time.perf_counter() - t0, 1)
         # The cache key must match the lookup above, whatever the runner reported.
         stats.model, stats.prompt_version = cfg.model, PROMPT_VERSION
+        stats.transcript_prep_tokens = s.prep_tokens
         s.stats = stats
         self.cache.put_pack(s.meta.video_id, s.pack, stats)
 
@@ -202,6 +262,10 @@ class InterviewPrepFlow(Flow[PrepState]):
             else:
                 self._progress("Notion export skipped: set NOTION_TOKEN and NOTION_PARENT_PAGE_ID.")
 
+        transcript_path = folder / f"{name} - Transcript (English).txt"
+        atomic_write_text(transcript_path, render.render_transcript(s.english, meta))
+        files.append(transcript_path)
+
         review_path = folder / "Quality Review.md"
         atomic_write_text(review_path, render.render_review(pack, meta, "md"))
         files.append(review_path)
@@ -211,8 +275,15 @@ class InterviewPrepFlow(Flow[PrepState]):
         atomic_write_text(folder / "metadata.json", dump_json({
             "video": meta.model_dump(),
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "subtitles": {"language": s.transcript.language_code, "auto_generated": s.transcript.is_generated,
-                          "condensed_for_length": s.condensed},
+            "transcript": {
+                "origin": s.english.describe(),
+                "source": s.english.source,
+                "original_language": s.english.translated_from or s.english.language_code
+                if s.english.source == "subtitles" else None,
+                "auto_generated": s.english.is_generated,
+                "translated": bool(s.english.translated_from or s.english.source == "ai_transcription"),
+                "condensed_for_length": s.condensed,
+            },
             "run": s.stats.model_dump(),
             "quality": {**pack.review.model_dump(), "overall": pack.review.overall, "revisions": pack.revisions},
             "files": [Path(f).name for f in result.files],

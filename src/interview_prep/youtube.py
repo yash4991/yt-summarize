@@ -121,6 +121,7 @@ def fetch_metadata(video_id: str) -> VideoMeta:
         duration_seconds=int(info.get("duration") or 0),
         url=url,
         upload_date=info.get("upload_date") or "",
+        description=(info.get("description") or "")[:2000],
     )
 
 
@@ -149,19 +150,49 @@ def list_playlist(url: str, limit: int | None = None) -> tuple[str, list[str]]:
 # --------------------------------------------------------------------------- #
 
 
-def fetch_transcript(video_id: str, api: YouTubeTranscriptApi | None = None) -> Transcript:
+class SubtitlesNotFound(YouTubeError):
+    """The video has no usable subtitles at all (they may be disabled)."""
+
+
+def _lang(code: str) -> str:
+    return code.lower().split("-")[0]
+
+
+def choose_track(tracks: list, source_languages: tuple[str, ...] = ("hi",)):
+    """Pick the best subtitle track.
+
+    Order: English, then each of ``source_languages`` (e.g. Hindi), then any other
+    language. Within each, human-written subtitles beat auto-generated ones.
+    Returns None if there are no tracks.
+    """
+    wanted = ["en", *[_lang(c) for c in source_languages if _lang(c) != "en"]]
+
+    def rank(t) -> tuple[int, int]:
+        lang = _lang(t.language_code)
+        group = wanted.index(lang) if lang in wanted else len(wanted)
+        return (group, 1 if t.is_generated else 0)
+
+    return min(tracks, key=rank, default=None)
+
+
+def fetch_transcript(video_id: str, api: YouTubeTranscriptApi | None = None,
+                     source_languages: tuple[str, ...] = ("hi",)) -> Transcript:
+    """Fetch the best available subtitles, in whatever language they are.
+
+    Non-English subtitles are returned as-is; translating them is a separate step.
+    Raises SubtitlesNotFound if the video has no subtitles at all.
+    """
     api = api or YouTubeTranscriptApi()
     try:
         listing = api.list(video_id)
-        try:
-            chosen = listing.find_manually_created_transcript(ENGLISH_CODES)
-        except NoTranscriptFound:
-            chosen = listing.find_generated_transcript(ENGLISH_CODES)
+        chosen = choose_track(list(listing), source_languages)
+        if chosen is None:
+            raise SubtitlesNotFound(f"Video {video_id} has no subtitles in any language.")
         fetched = chosen.fetch()
     except NoTranscriptFound as e:
-        raise YouTubeError(f"Video {video_id} has no English subtitles (manual or auto-generated).") from e
+        raise SubtitlesNotFound(f"Video {video_id} has no subtitles in any language.") from e
     except TranscriptsDisabled as e:
-        raise YouTubeError(f"Subtitles are disabled for video {video_id}.") from e
+        raise SubtitlesNotFound(f"Subtitles are disabled for video {video_id}.") from e
     except VideoUnavailable as e:
         raise YouTubeError(f"Video {video_id} is unavailable (private, deleted or region-locked).") from e
     except (RequestBlocked, IpBlocked) as e:
@@ -176,7 +207,7 @@ def fetch_transcript(video_id: str, api: YouTubeTranscriptApi | None = None) -> 
         if _clean(s.text)
     ]
     if not segments:
-        raise YouTubeError(f"The English subtitles for {video_id} are empty.")
+        raise SubtitlesNotFound(f"The subtitles for {video_id} are empty.")
     log.info("Transcript %s: %d lines (%s, generated=%s)", video_id, len(segments),
              chosen.language_code, chosen.is_generated)
     return Transcript(
@@ -224,6 +255,34 @@ def timestamped_text(segments: list[Segment], block_seconds: int = 30) -> str:
     if current:
         blocks.append(f"[{fmt_ts(block_start)}] {' '.join(current)}")
     return "\n".join(blocks)
+
+
+_MARKER_RE = re.compile(r"^\s*\[(?:(\d+):)?(\d{1,2}):(\d{2})\]\s*(.*)$")
+
+
+def parse_ts(marker: str) -> int | None:
+    """'[1:02:05]' or '[03:15]' -> seconds."""
+    m = _MARKER_RE.match(marker if marker.strip().startswith("[") else f"[{marker}]")
+    if not m:
+        return None
+    h, mnt, sec = int(m.group(1) or 0), int(m.group(2)), int(m.group(3))
+    return h * 3600 + mnt * 60 + sec
+
+
+def parse_marked_lines(text: str) -> list[Segment]:
+    """Parse '[mm:ss] text' lines (e.g. LLM output) back into segments.
+    Lines without a marker are appended to the previous segment."""
+    segments: list[Segment] = []
+    for line in text.splitlines():
+        m = _MARKER_RE.match(line)
+        if m:
+            start = int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+            body = m.group(4).strip()
+            if body:
+                segments.append(Segment(start=start, text=body))
+        elif line.strip() and segments:
+            segments[-1].text += " " + line.strip()
+    return segments
 
 
 def split_blocks(text: str, max_chars: int) -> list[str]:

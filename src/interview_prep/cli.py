@@ -51,8 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--whole-playlist", action="store_true",
                    help="For watch?v=...&list=... URLs, process the whole playlist instead of one video.")
     p.add_argument("--limit", type=int, help="Only the first N videos of each playlist.")
+    p.add_argument("--languages", help="Subtitle languages to use when there are no English ones, in order "
+                                       "of preference, e.g. hi,mr (default from SUBTITLE_LANGUAGES or hi).")
+    p.add_argument("--no-transcribe", action="store_true",
+                   help="Skip videos without subtitles instead of letting Gemini transcribe the audio.")
     p.add_argument("--export", help="Comma-separated extra formats: md,pdf,notion (default from EXPORTS or md,pdf).")
-    p.add_argument("--model", help="LLM, e.g. anthropic/claude-sonnet-5-5 (default from LLM_MODEL).")
+    p.add_argument("--model", help="LLM, e.g. gemini/gemini-2.5-flash or anthropic/claude-sonnet-5-5 "
+                                    "(default from LLM_MODEL).")
     p.add_argument("--out", type=Path, help="Output folder (default: output).")
     p.add_argument("-v", "--verbose", action="store_true", help="Show agent reasoning and logs.")
     return p
@@ -74,11 +79,16 @@ def main(argv: list[str] | None = None) -> int:
         build_parser().print_help()
         return 2
 
+    def csv(value: str | None) -> tuple[str, ...] | None:
+        return tuple(x.strip() for x in value.split(",") if x.strip()) if value else None
+
     settings = Settings().with_overrides(
         model=args.model,
         output_dir=args.out,
-        exports=tuple(x.strip() for x in args.export.split(",")) if args.export else None,
+        exports=csv(args.export),
         verbose=args.verbose or None,
+        subtitle_languages=csv(args.languages),
+        transcribe_fallback=False if args.no_transcribe else None,
     )
     setup_logging(settings.cache_dir / "logs", args.verbose)
     key = missing_api_key(settings.model)

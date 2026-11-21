@@ -21,7 +21,7 @@ def offline(monkeypatch, meta, transcript):
         calls["meta"] += 1
         return meta.model_copy(update={"video_id": vid})
 
-    def fake_transcript(vid):
+    def fake_transcript(vid, **kw):
         calls["transcript"] += 1
         return transcript.model_copy(update={"video_id": vid})
 
@@ -77,10 +77,10 @@ def test_playlist_batch_with_failure(offline, settings, fake_runner, monkeypatch
     monkeypatch.setattr(pipeline, "list_playlist", lambda url, limit=None: ("My Course", ids))
     real = flow_mod.fetch_transcript
 
-    def flaky(vid):
+    def flaky(vid, **kw):
         if vid == "bbbbbbbbbbb":
             raise RuntimeError("no captions")
-        return real(vid)
+        return real(vid, **kw)
 
     monkeypatch.setattr(flow_mod, "fetch_transcript", flaky)
     rep = pipeline.run_batch(["https://www.youtube.com/playlist?list=PLx"], settings, crew_runner=fake_runner)

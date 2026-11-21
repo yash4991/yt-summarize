@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "crewai[anthropic]>=1.15.44",
+    "crewai[anthropic,google-genai]>=1.15.44",
     "markdown-pdf>=1.14",
     "notion-client>=3.1.0",
     "pydantic>=2.12.5",

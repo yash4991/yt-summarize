@@ -16,8 +16,8 @@ Every key point carries a **timestamp** (`[03:15]`). In the Markdown, PDF and No
 
 ```mermaid
 flowchart LR
-    A[YouTube URL<br/>or playlist] --> B[load_video<br/>metadata + English subtitles]
-    B --> C[prepare_transcript<br/>add mm:ss markers,<br/>condense if very long]
+    A[YouTube URL<br/>or playlist] --> B[load_video<br/>metadata + best subtitles]
+    B --> C[prepare_transcript<br/>Hindi subs: translate + clean<br/>no subs: Gemini transcribes<br/>condense if very long]
     C --> D{{Summary Crew}}
     subgraph D [Summary Crew - CrewAI]
       direction TB
@@ -36,13 +36,27 @@ flowchart LR
 * **Built-in quality gate.** A second agent checks every claim against the transcript. If it finds a factual error, the coach rewrites the pack using the reviewer's notes. The scores are saved with each result.
 * **Caching.** Subtitles and generated packs are cached in `.cache/`. Re-running a video costs nothing. Changing the model or prompts automatically invalidates the cache.
 
+## Hindi videos and videos without subtitles
+
+Many tech videos are narrated in Hindi or Hinglish and only have **auto-generated Hindi subtitles**. They're written in Devanagari, have no punctuation, and are full of mis-heard words ("रम" for RAM, "रेप्स" for replicas). The agent picks the best text it can find:
+
+| The video has… | What happens |
+|---|---|
+| English subtitles | Used as-is (human-written ones are preferred over auto-generated) |
+| Only Hindi (or other) subtitles | The LLM translates them to English **and cleans them up**. Using the title and description as context, it fixes mis-heard technical terms, applies the speaker's own corrections, and drops filler. Timestamps are kept. |
+| No subtitles at all | Gemini watches the video straight from its URL (nothing is downloaded) and writes a clean English transcript with timestamps |
+
+The English transcript the agents worked from is saved next to the summaries as `<Title> - Transcript (English).txt`. Translations are cached, so you pay for them only once per video. The coach and reviewer are told when a transcript was translated, so the reviewer doesn't penalise correctly fixed terms.
+
+Choose the languages with `SUBTITLE_LANGUAGES` (default `hi`) or `--languages hi,mr`. To skip videos without subtitles instead of transcribing them, use `--no-transcribe`.
+
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 for you).
 
 ```bash
 uv sync
-cp .env.example .env        # then add your ANTHROPIC_API_KEY
+cp .env.example .env        # then add your GEMINI_API_KEY
 ```
 
 ### Web UI
@@ -76,8 +90,10 @@ uv run interview-prep -f urls.txt --limit 5 --export md,pdf,notion
 | `--whole-playlist` | For a `watch?v=…&list=…` link, process the whole playlist |
 | `--limit N` | Only the first N videos of each playlist |
 | `--export md,pdf,notion` | Extra formats (`.txt` is always written) |
-| `--model` | e.g. `anthropic/claude-haiku-5-5` for lower cost |
+| `--model` | Override the model, e.g. `anthropic/claude-sonnet-5-5` |
 | `--out DIR` | Output folder (default `output/`) |
+| `--languages hi,mr` | Subtitle languages to translate when there are no English ones |
+| `--no-transcribe` | Skip videos with no subtitles instead of having Gemini transcribe them |
 | `-v` | Show the agents' reasoning |
 
 ### Output layout
@@ -89,6 +105,7 @@ output/
 │   ├── But what is a neural network - Detailed Summary.txt / .md
 │   ├── But what is a neural network - Interview Q&A.txt / .md
 │   ├── But what is a neural network - Study Guide.pdf
+│   ├── But what is a neural network - Transcript (English).txt
 │   ├── Quality Review.md
 │   └── metadata.json
 └── System Design Course/            ← playlist
@@ -116,12 +133,18 @@ docker run --env-file .env -p 8501:8501 -v "$PWD/output:/app/output" interview-p
 
 ## Configuration
 
+The default model is `gemini/gemini-2.5-flash`. To use another model, set `LLM_MODEL` and the matching API key; any CrewAI-supported provider works.
+
+> **Free-tier limits:** a Gemini free-tier key allows about 20 requests per day for 2.5 Flash. One video uses roughly 6–12 requests: 4 agent tasks, double that if the reviewer asks for a rewrite, plus 1 per ~15 minutes of video for translation or transcription. That's 2–3 videos a day. Everything is cached, so a failed run picks up where it stopped. For more volume, enable billing on the key's Google AI Studio project.
+
+> Google has limited Gemini 2.5 access to existing users and has announced a deprecation, so new API keys may be refused with a "model not available" error. If that happens, set `LLM_MODEL` to a newer Gemini model or to `anthropic/claude-sonnet-5-5`.
+
 All settings live in `.env`. See [.env.example](.env.example) for the full list: model, output and cache folders, export formats, the quality-gate threshold, long-video chunking, and Notion.
 
 ## Development
 
 ```bash
-uv run pytest                    # 33 tests; YouTube and the LLM are faked, no API key needed
+uv run pytest                    # 51 tests; YouTube and the LLM are faked, no API key needed
 uvx ruff@0.14.0 check src tests  # lint
 ```
 
@@ -135,6 +158,8 @@ src/interview_prep/
 ├── crew/              The crew: agents.yaml, tasks.yaml, summary_crew.py
 ├── models.py          Pydantic schemas for every agent output
 ├── youtube.py         URL parsing, subtitles, metadata, playlists (no LLM)
+├── translate.py       Hindi/other subtitles → clean English (LLM)
+├── transcribe.py      No subtitles → Gemini transcribes the video
 ├── render.py          Pack → .txt / .md documents
 ├── exporters.py       PDF and Notion
 ├── pipeline.py        Batches, playlists, combined study guides

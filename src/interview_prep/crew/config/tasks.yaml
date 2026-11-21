@@ -6,11 +6,15 @@ short_summary:
     Below is the transcript. Each line starts with a [mm:ss] or [h:mm:ss]
     marker showing where it is spoken in the video.
 
+    {transcript_note}
+
     ---------------- TRANSCRIPT START ----------------
     {transcript}
     ---------------- TRANSCRIPT END ------------------
 
     {revision_notes}
+
+    Write all study material in English.
 
     Write a SHORT summary that someone can read in two minutes right before an
     interview:
@@ -68,7 +72,12 @@ interview_qa:
 review:
   description: >
     Review the short summary, detailed summary and interview Q&A written for
-    the video "{title}" (you have them as context) against its transcript:
+    the video "{title}" (you have them as context) against its transcript.
+
+    {transcript_note}
+    If the transcript was translated or transcribed by AI, judge faithfulness
+    against what the speaker clearly meant. Do not penalise the study material
+    for correctly fixing an obviously mis-recognised term.
 
     ---------------- TRANSCRIPT START ----------------
     {transcript}

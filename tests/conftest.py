@@ -82,9 +82,11 @@ def fake_runner():
     """Stands in for the LLM crew. Records how often it was called."""
     calls = []
 
-    def runner(settings, meta, llm_text, progress):
+    def runner(settings, meta, llm_text, progress, transcript_note=""):
         calls.append(llm_text)
+        runner.notes.append(transcript_note)
         return make_pack(), RunStats(model=settings.model, prompt_version="test", total_tokens=1234)
 
     runner.calls = calls
+    runner.notes = []
     return runner

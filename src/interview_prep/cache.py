@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 class TranscriptEntry(BaseModel):
     meta: VideoMeta
-    transcript: Transcript
+    transcript: Transcript | None  # None = the video has no subtitles
 
 
 class PackEntry(BaseModel):
@@ -59,9 +59,19 @@ class Cache:
     def get_transcript(self, video_id: str) -> TranscriptEntry | None:
         return self._load(self._transcript_path(video_id), TranscriptEntry)
 
-    def put_transcript(self, meta: VideoMeta, transcript: Transcript) -> None:
+    def put_transcript(self, meta: VideoMeta, transcript: Transcript | None) -> None:
         entry = TranscriptEntry(meta=meta, transcript=transcript)
         atomic_write_text(self._transcript_path(meta.video_id), entry.model_dump_json())
+
+    def _english_path(self, video_id: str, model: str, prompt_version: str) -> Path:
+        return self.root / "english" / f"{video_id}__{_slug(model)}__{_slug(prompt_version)}.json"
+
+    def get_english(self, video_id: str, model: str, prompt_version: str) -> Transcript | None:
+        """Translated / AI-transcribed English text (the expensive part for non-English videos)."""
+        return self._load(self._english_path(video_id, model, prompt_version), Transcript)
+
+    def put_english(self, video_id: str, model: str, prompt_version: str, transcript: Transcript) -> None:
+        atomic_write_text(self._english_path(video_id, model, prompt_version), transcript.model_dump_json())
 
     def get_pack(self, video_id: str, model: str, prompt_version: str) -> PackEntry | None:
         return self._load(self._pack_path(video_id, model, prompt_version), PackEntry)
@@ -75,6 +85,7 @@ class Cache:
         return {
             "transcripts": len(list((self.root / "transcripts").glob("*.json"))),
             "packs": len(list((self.root / "packs").glob("*.json"))),
+            "english": len(list((self.root / "english").glob("*.json"))),
         }
 
 

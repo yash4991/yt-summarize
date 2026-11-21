@@ -23,7 +23,8 @@ base = Settings()
 # --------------------------------------------------------------------------- #
 with st.sidebar:
     st.header("Settings")
-    model = st.text_input("Model", base.model, help="Any CrewAI-supported model, e.g. anthropic/claude-sonnet-5-5")
+    model = st.text_input("Model", base.model, help="Any CrewAI-supported model, e.g. gemini/gemini-2.5-flash "
+                                                    "or anthropic/claude-sonnet-5-5")
     if key_var := missing_api_key(model):
         st.error(f"{key_var} is not set. Add it to your .env file (only cached videos will work).")
     st.caption("Always saved: .txt files (short, detailed, Q&A)")
@@ -32,6 +33,13 @@ with st.sidebar:
     notion_ready = bool(base.notion_token and base.notion_parent_page_id)
     exp_notion = st.checkbox("Publish to Notion", "notion" in base.exports and notion_ready, disabled=not notion_ready,
                              help=None if notion_ready else "Set NOTION_TOKEN and NOTION_PARENT_PAGE_ID in .env")
+    st.divider()
+    st.caption("Non-English videos")
+    langs = st.text_input("Subtitle languages if no English", ",".join(base.subtitle_languages),
+                          help="In order of preference, e.g. hi or hi,mr. These are translated to clean English.")
+    transcribe = st.checkbox("No subtitles? Let Gemini transcribe the audio", base.transcribe_fallback,
+                             help="Gemini watches the video from its URL and writes an English transcript. "
+                                  "Needs GEMINI_API_KEY.")
     st.divider()
     force = st.checkbox("Ignore cache (regenerate)", False)
     whole_playlist = st.checkbox("Treat watch?v=…&list=… links as whole playlists", False)
@@ -42,6 +50,8 @@ with st.sidebar:
 settings = base.with_overrides(
     model=model,
     exports=tuple(x for x, on in [("md", exp_md), ("pdf", exp_pdf), ("notion", exp_notion)] if on),
+    subtitle_languages=tuple(x.strip() for x in langs.split(",") if x.strip()) or ("hi",),
+    transcribe_fallback=transcribe,
 )
 
 # --------------------------------------------------------------------------- #

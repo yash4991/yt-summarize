@@ -26,6 +26,8 @@ class VideoMeta(BaseModel):
     duration_seconds: int = 0
     url: str = ""
     upload_date: str = ""
+    # Used as topic context when translating / cleaning up noisy subtitles.
+    description: str = ""
 
     @property
     def watch_url(self) -> str:
@@ -40,15 +42,42 @@ class Segment(BaseModel):
     text: str
 
 
+TranscriptSource = Literal["subtitles", "ai_transcription"]
+
+
 class Transcript(BaseModel):
     video_id: str
     language_code: str
     is_generated: bool
     segments: list[Segment]
+    source: TranscriptSource = "subtitles"
+    # Set when this English text was produced by translating other-language subtitles.
+    translated_from: str | None = None
 
     @property
     def full_text(self) -> str:
         return " ".join(s.text for s in self.segments)
+
+    @property
+    def is_english(self) -> bool:
+        return self.language_code.lower().split("-")[0] == "en"
+
+    def describe(self) -> str:
+        """Human-readable origin, e.g. 'auto-generated Hindi subtitles, translated to English by AI'."""
+        if self.source == "ai_transcription":
+            return "transcribed from the video's audio and translated to English by AI"
+        kind = "auto-generated" if self.is_generated else "human-written"
+        if self.translated_from:
+            return f"{kind} {language_name(self.translated_from)} subtitles, translated to English by AI"
+        return f"{kind} {language_name(self.language_code)} subtitles"
+
+
+_LANGUAGE_NAMES = {"en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil", "te": "Telugu", "mr": "Marathi",
+                   "gu": "Gujarati", "kn": "Kannada", "ml": "Malayalam", "pa": "Punjabi", "ur": "Urdu"}
+
+
+def language_name(code: str) -> str:
+    return _LANGUAGE_NAMES.get(code.lower().split("-")[0], code)
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +182,8 @@ class RunStats(BaseModel):
     llm_requests: int = 0
     seconds: float = 0.0
     from_cache: bool = False
+    # Tokens spent turning non-English / missing subtitles into English text.
+    transcript_prep_tokens: int = 0
 
 
 class VideoResult(BaseModel):

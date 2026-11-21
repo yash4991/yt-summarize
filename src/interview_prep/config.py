@@ -12,17 +12,27 @@ load_dotenv()
 
 # Bump this whenever prompts or output schemas change, so old cached results
 # are not reused for the new prompts.
-PROMPT_VERSION = "2026.11.1"
+PROMPT_VERSION = "2026.11.2"
 
 
-_KEY_VARS = {"anthropic": "ANTHROPIC_API_KEY", "claude": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
-             "gemini": "GEMINI_API_KEY"}
+DEFAULT_MODEL = "gemini/gemini-2.5-flash"
+
+# Provider prefix -> accepted API-key variables (any one of them is enough).
+_KEY_VARS = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "claude": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+}
 
 
 def missing_api_key(model: str) -> str | None:
     """Name of the API-key variable this model needs but which is not set, else None."""
-    var = _KEY_VARS.get(model.split("/")[0].lower())
-    return var if var and not os.getenv(var) else None
+    names = _KEY_VARS.get(model.split("/")[0].lower(), ())
+    if not names or any(os.getenv(n) for n in names):
+        return None
+    return " or ".join(names)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -32,7 +42,7 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass
 class Settings:
-    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "anthropic/claude-sonnet-5-5"))
+    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", DEFAULT_MODEL))
     output_dir: Path = field(default_factory=lambda: Path(os.getenv("OUTPUT_DIR", "output")))
     cache_dir: Path = field(default_factory=lambda: Path(os.getenv("CACHE_DIR", ".cache")))
     # Exports in addition to the .txt files: any of "md", "pdf", "notion".
@@ -48,6 +58,16 @@ class Settings:
     # Transcripts longer than this (characters) are condensed chunk by chunk first.
     max_transcript_chars: int = field(default_factory=lambda: int(os.getenv("MAX_TRANSCRIPT_CHARS", "240000")))
     chunk_chars: int = field(default_factory=lambda: int(os.getenv("CHUNK_CHARS", "60000")))
+    # Non-English subtitles: languages to prefer after English (e.g. "hi" = Hindi).
+    # They are translated to English and cleaned up by the LLM.
+    subtitle_languages: tuple[str, ...] = field(
+        default_factory=lambda: tuple(x.strip() for x in os.getenv("SUBTITLE_LANGUAGES", "hi").split(",") if x.strip())
+    )
+    translate_chunk_chars: int = field(default_factory=lambda: int(os.getenv("TRANSLATE_CHUNK_CHARS", "15000")))
+    # No subtitles at all: let Gemini listen to the video and transcribe + translate it.
+    transcribe_fallback: bool = field(default_factory=lambda: _bool("TRANSCRIBE_FALLBACK", True))
+    transcribe_model: str = field(default_factory=lambda: os.getenv("TRANSCRIBE_MODEL", "gemini-2.5-flash"))
+    transcribe_window_seconds: int = field(default_factory=lambda: int(os.getenv("TRANSCRIBE_WINDOW_SECONDS", "900")))
     notion_token: str | None = field(default_factory=lambda: os.getenv("NOTION_TOKEN") or None)
     notion_parent_page_id: str | None = field(default_factory=lambda: os.getenv("NOTION_PARENT_PAGE_ID") or None)
     verbose: bool = field(default_factory=lambda: _bool("CREW_VERBOSE", False))

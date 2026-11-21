@@ -7,6 +7,9 @@ from crewai.project import CrewBase, agent, crew, task
 
 from ..models import DetailedSummary, InterviewQA, ReviewReport, ShortSummary
 
+# Generous: Gemini 2.5 "thinking" tokens count against this limit too.
+MAX_OUTPUT_TOKENS = 16000
+
 
 @CrewBase
 class SummaryCrew:
@@ -18,7 +21,7 @@ class SummaryCrew:
         self.verbose = verbose
 
     def _llm(self, temperature: float) -> LLM:
-        return LLM(model=self.model, temperature=temperature, max_tokens=8000)
+        return LLM(model=self.model, temperature=temperature, max_tokens=MAX_OUTPUT_TOKENS)
 
     @agent
     def interview_coach(self) -> Agent:
@@ -70,5 +73,5 @@ TRANSCRIPT PART:
 
 
 def condense_chunk(model: str, chunk: str, part: int, parts: int) -> str:
-    llm = LLM(model=model, temperature=0.0, max_tokens=8000)
+    llm = LLM(model=model, temperature=0.0, max_tokens=MAX_OUTPUT_TOKENS)
     return llm.call([{"role": "user", "content": CONDENSE_PROMPT.format(part=part, parts=parts, chunk=chunk)}])

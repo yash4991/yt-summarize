@@ -13,8 +13,8 @@ from __future__ import annotations
 import textwrap
 from typing import Literal
 
-from .models import KeyPoint, StudyPack, VideoMeta
-from .youtube import fmt_ts
+from .models import KeyPoint, StudyPack, Transcript, VideoMeta
+from .youtube import fmt_ts, timestamped_text
 
 Fmt = Literal["txt", "md"]
 
@@ -181,6 +181,16 @@ def render_review(pack: StudyPack, meta: VideoMeta, fmt: Fmt = "md") -> str:
         d.heading("Remaining notes")
         d.bullets([f"[{i.severity}] {i.location}: {i.problem} -> {i.fix}" for i in r.issues])
     return d.text()
+
+
+def render_transcript(transcript: Transcript, meta: VideoMeta) -> str:
+    """The English transcript the agents worked from, one timestamped passage per paragraph."""
+    lines = [f"{meta.title} - Transcript (English)".upper(), "=" * 60, "",
+             f"Video:   {meta.title} - {meta.channel}", f"Link:    {meta.watch_url}",
+             f"Source:  {transcript.describe()}", ""]
+    for block in timestamped_text(transcript.segments).splitlines():
+        lines += textwrap.wrap(block, 100, subsequent_indent="        ") + [""]
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def render_study_guide(pack: StudyPack, meta: VideoMeta) -> str:
