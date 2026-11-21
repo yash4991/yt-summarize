@@ -1,0 +1,43 @@
+[project]
+name = "interview-prep"
+version = "0.1.0"
+description = "CrewAI agent that turns YouTube videos into interview-ready study notes"
+readme = "README.md"
+authors = [
+    { name = "Yash", email = "yashsharma1094@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "crewai[anthropic]>=1.15.44",
+    "markdown-pdf>=1.14",
+    "notion-client>=3.1.0",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.4",
+    "streamlit>=1.67.0",
+    "youtube-transcript-api>=1.2.5",
+    "yt-dlp>=2026.10.26",
+]
+
+[project.scripts]
+interview-prep = "interview_prep:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]

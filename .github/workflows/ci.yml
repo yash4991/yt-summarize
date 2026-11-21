@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.1"
+      - name: Install
+        run: uv sync --locked
+      - name: Lint
+        run: uvx ruff@0.14.0 check src tests
+      - name: Test
+        # Tests use fakes for YouTube and the LLM, so no API key is needed.
+        run: uv run pytest
+        env:
+          PYTHONIOENCODING: utf-8
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t interview-prep .
