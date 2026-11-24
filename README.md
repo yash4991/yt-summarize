@@ -50,6 +50,25 @@ The English transcript the agents worked from is saved next to the summaries as 
 
 Choose the languages with `SUBTITLE_LANGUAGES` (default `hi`) or `--languages hi,mr`. To skip videos without subtitles instead of transcribing them, use `--no-transcribe`.
 
+## Running on a local model (LM Studio)
+
+A local model is an **option** alongside the cloud model, not a replacement. It's free, has no quotas, and keeps everything on your machine, but it runs slower.
+
+1. In LM Studio, load a chat model and start the server: **Developer** tab → **Start server**, or run `lms server start`.
+2. In `.env`, set `LOCAL_BASE_URL` to the server's address (shown in LM Studio, e.g. `http://localhost:1234/v1`). Set `LOCAL_CONTEXT_TOKENS` to the context length the model is loaded with.
+3. Choose how to use it:
+
+| Goal | Command line | Web UI | `.env` |
+|---|---|---|---|
+| Local model for everything | `--local` | **AI model → Local model** | `LLM_MODEL=local` |
+| Cloud model, local when the daily quota runs out | `--fallback-local` | **Cloud model** + "If the daily quota runs out…" | `FALLBACK_MODEL=local` |
+
+How the app adapts to a local model:
+* **Thinking is turned off** (`LOCAL_REASONING_EFFORT=none`). Reasoning models otherwise spend minutes "thinking" before every answer.
+* **Inputs are sized to the model's context window.** Long transcripts are condensed first, and translation runs one part at a time.
+* **Caches are kept per model.** A Gemini summary is never mixed up with a local one, but an English translation made by either model is reused by both.
+* **Videos with no subtitles still need Gemini**, because a text-only model can't listen to audio.
+
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 for you).
@@ -93,6 +112,8 @@ uv run interview-prep -f urls.txt --limit 5 --export md,pdf,notion
 | `--model` | Override the model, e.g. `anthropic/claude-sonnet-5-5` |
 | `--out DIR` | Output folder (default `output/`) |
 | `--languages hi,mr` | Subtitle languages to translate when there are no English ones |
+| `--local` | Use the local model (LM Studio) for everything |
+| `--fallback-local` | Switch to the local model if the cloud model's daily quota runs out |
 | `--no-transcribe` | Skip videos with no subtitles instead of having Gemini transcribe them |
 | `-v` | Show the agents' reasoning |
 
@@ -144,7 +165,7 @@ All settings live in `.env`. See [.env.example](.env.example) for the full list:
 ## Development
 
 ```bash
-uv run pytest                    # 51 tests; YouTube and the LLM are faked, no API key needed
+uv run pytest                    # 64 tests; YouTube and the LLM are faked, no API key needed
 uvx ruff@0.14.0 check src tests  # lint
 ```
 
@@ -160,6 +181,8 @@ src/interview_prep/
 ├── youtube.py         URL parsing, subtitles, metadata, playlists (no LLM)
 ├── translate.py       Hindi/other subtitles → clean English (LLM)
 ├── transcribe.py      No subtitles → Gemini transcribes the video
+├── llm.py             Cloud or local (LM Studio) model selection
+├── retry.py           Retries on overload; clear daily-quota errors
 ├── render.py          Pack → .txt / .md documents
 ├── exporters.py       PDF and Notion
 ├── pipeline.py        Batches, playlists, combined study guides

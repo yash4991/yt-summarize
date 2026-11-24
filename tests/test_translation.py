@@ -150,7 +150,7 @@ def test_hindi_video_is_translated_once_and_noted(youtube, hindi, settings, fake
     youtube["transcript"] = hindi
     calls = []
 
-    def fake_translate(t, meta, model, chunk_chars, progress):
+    def fake_translate(t, meta, model, chunk_chars, progress, **kw):
         calls.append(model)
         segs = [Segment(start=s.start, text="Clean English about replicas") for s in t.segments]
         return Transcript(video_id=t.video_id, language_code="en", is_generated=True, segments=segs,

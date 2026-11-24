@@ -14,7 +14,8 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from .config import Settings, missing_api_key
+from .config import Settings, is_local, missing_api_key
+from .llm import local_model_id, local_server_problem
 
 
 def setup_console() -> None:
@@ -58,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--export", help="Comma-separated extra formats: md,pdf,notion (default from EXPORTS or md,pdf).")
     p.add_argument("--model", help="LLM, e.g. gemini/gemini-2.5-flash or anthropic/claude-sonnet-5-5 "
                                     "(default from LLM_MODEL).")
+    p.add_argument("--local", action="store_true",
+                   help="Use the local model (LM Studio) for everything instead of the cloud model.")
+    p.add_argument("--fallback-local", action="store_true",
+                   help="Use the cloud model, but switch to the local model if its daily quota runs out.")
     p.add_argument("--out", type=Path, help="Output folder (default: output).")
     p.add_argument("-v", "--verbose", action="store_true", help="Show agent reasoning and logs.")
     return p
@@ -83,7 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         return tuple(x.strip() for x in value.split(",") if x.strip()) if value else None
 
     settings = Settings().with_overrides(
-        model=args.model,
+        model="local" if args.local else args.model,
+        fallback_model="local" if args.fallback_local else None,
         output_dir=args.out,
         exports=csv(args.export),
         verbose=args.verbose or None,
@@ -95,6 +101,13 @@ def main(argv: list[str] | None = None) -> int:
     if key:
         print(f"Warning: {key} is not set (needed for {settings.model}). Only cached videos will work.\n"
               f"Add it to a .env file in this folder - see .env.example.")
+    for role, model in (("main", settings.model), ("fallback", settings.fallback_model)):
+        if model and is_local(model):
+            problem = local_server_problem(settings, model)
+            if problem:
+                print(f"Warning ({role} model): {problem}")
+            else:
+                print(f"Local {role} model: {local_model_id(settings, model)} at {settings.local_base_url}")
 
     from .pipeline import run_batch
 

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from crewai import LLM, Agent, Crew, Process, Task
+from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
 
+from ..config import Settings
+from ..llm import make_llm
 from ..models import DetailedSummary, InterviewQA, ReviewReport, ShortSummary
-
-# Generous: Gemini 2.5 "thinking" tokens count against this limit too.
-MAX_OUTPUT_TOKENS = 16000
 
 
 @CrewBase
@@ -16,12 +15,13 @@ class SummaryCrew:
     agents_config = "config/agents.yaml"
     tasks_config = "config/tasks.yaml"
 
-    def __init__(self, model: str, verbose: bool = False) -> None:
-        self.model = model
-        self.verbose = verbose
+    def __init__(self, settings: Settings, model: str | None = None) -> None:
+        self.settings = settings
+        self.model = model or settings.model
+        self.verbose = settings.verbose
 
-    def _llm(self, temperature: float) -> LLM:
-        return LLM(model=self.model, temperature=temperature, max_tokens=MAX_OUTPUT_TOKENS)
+    def _llm(self, temperature: float):
+        return make_llm(self.settings, self.model, temperature)
 
     @agent
     def interview_coach(self) -> Agent:
@@ -72,6 +72,6 @@ TRANSCRIPT PART:
 """
 
 
-def condense_chunk(model: str, chunk: str, part: int, parts: int) -> str:
-    llm = LLM(model=model, temperature=0.0, max_tokens=MAX_OUTPUT_TOKENS)
+def condense_chunk(settings: Settings, model: str, chunk: str, part: int, parts: int) -> str:
+    llm = make_llm(settings, model, temperature=0.0)
     return llm.call([{"role": "user", "content": CONDENSE_PROMPT.format(part=part, parts=parts, chunk=chunk)}])

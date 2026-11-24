@@ -70,6 +70,16 @@ class Cache:
         """Translated / AI-transcribed English text (the expensive part for non-English videos)."""
         return self._load(self._english_path(video_id, model, prompt_version), Transcript)
 
+    def find_english(self, video_id: str, prompt_version: str) -> Transcript | None:
+        """The most recent English transcript for this video from any model."""
+        files = sorted((self.root / "english").glob(f"{video_id}__*__{_slug(prompt_version)}.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in files:
+            found = self._load(path, Transcript)
+            if found:
+                return found
+        return None
+
     def put_english(self, video_id: str, model: str, prompt_version: str, transcript: Transcript) -> None:
         atomic_write_text(self._english_path(video_id, model, prompt_version), transcript.model_dump_json())
 

@@ -35,6 +35,20 @@ def missing_api_key(model: str) -> str | None:
     return " or ".join(names)
 
 
+def is_local(model: str) -> bool:
+    """'local' or 'local/<model-id>' means the local OpenAI-compatible server (LM Studio)."""
+    return model == "local" or model.startswith("local/")
+
+
+@dataclass(frozen=True)
+class Limits:
+    max_transcript_chars: int
+    chunk_chars: int
+    translate_chunk_chars: int
+    max_output_tokens: int
+    parallel: int
+
+
 def _bool(name: str, default: bool) -> bool:
     v = os.getenv(name)
     return default if v is None else v.strip().lower() in {"1", "true", "yes", "on"}
@@ -71,6 +85,34 @@ class Settings:
     notion_token: str | None = field(default_factory=lambda: os.getenv("NOTION_TOKEN") or None)
     notion_parent_page_id: str | None = field(default_factory=lambda: os.getenv("NOTION_PARENT_PAGE_ID") or None)
     verbose: bool = field(default_factory=lambda: _bool("CREW_VERBOSE", False))
+
+    # --- Local model (LM Studio or any OpenAI-compatible server) ------------
+    # Use it with LLM_MODEL=local (or local/<model-id>), or as FALLBACK_MODEL.
+    local_base_url: str = field(default_factory=lambda: os.getenv("LOCAL_BASE_URL", "http://localhost:1234/v1"))
+    local_model: str = field(default_factory=lambda: os.getenv("LOCAL_MODEL", ""))  # empty = first loaded model
+    local_api_key: str = field(default_factory=lambda: os.getenv("LOCAL_API_KEY", "lm-studio"))
+    # Must match (or be below) the context length the model is loaded with in LM Studio.
+    local_context_tokens: int = field(default_factory=lambda: int(os.getenv("LOCAL_CONTEXT_TOKENS", "16384")))
+    # "none" turns off long hidden "thinking", which is far too slow on a laptop GPU.
+    local_reasoning_effort: str = field(default_factory=lambda: os.getenv("LOCAL_REASONING_EFFORT", "none"))
+    local_timeout_seconds: int = field(default_factory=lambda: int(os.getenv("LOCAL_TIMEOUT_SECONDS", "1800")))
+    # Model to switch to when the main model's daily quota runs out (e.g. "local"). Empty = no fallback.
+    fallback_model: str = field(default_factory=lambda: os.getenv("FALLBACK_MODEL", ""))
+
+    def limits(self, model: str | None = None) -> Limits:
+        """Size limits for a model. Local models have a much smaller context window."""
+        model = model or self.model
+        if not is_local(model):
+            return Limits(self.max_transcript_chars, self.chunk_chars, self.translate_chunk_chars, 16000, 4)
+        ctx = self.local_context_tokens
+        # Each crew task sees the transcript plus earlier tasks' output, and must leave room to answer.
+        return Limits(
+            max_transcript_chars=int(ctx * 0.3 * 3.5),
+            chunk_chars=int(ctx * 0.35 * 3.5),
+            translate_chunk_chars=int(ctx * 0.3 * 2.5),  # Devanagari packs fewer chars per token
+            max_output_tokens=min(16000, ctx // 2),
+            parallel=1,  # one GPU: parallel requests only queue up
+        )
 
     def with_overrides(self, **kw) -> Settings:
         data = {k: v for k, v in self.__dict__.items()}

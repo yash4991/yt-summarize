@@ -65,7 +65,11 @@ def test_long_transcript_is_condensed(offline, settings, fake_runner, monkeypatc
     import interview_prep.crew as crew_pkg
 
     seen = []
-    monkeypatch.setattr(crew_pkg, "condense_chunk", lambda model, chunk, i, n: seen.append(i) or f"[00:00] notes {i}")
+    def fake_condense(cfg, model, chunk, i, n):
+        seen.append(i)
+        return f"[00:00] notes {i}"
+
+    monkeypatch.setattr(crew_pkg, "condense_chunk", fake_condense)
     settings.max_transcript_chars, settings.chunk_chars = 500, 300
     process_video("abcdefghijk", settings, crew_runner=fake_runner)
     assert len(seen) > 1

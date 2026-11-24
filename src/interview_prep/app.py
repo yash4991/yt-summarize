@@ -11,7 +11,8 @@ from pathlib import Path
 import streamlit as st
 
 from interview_prep import render
-from interview_prep.config import Settings, missing_api_key
+from interview_prep.config import DEFAULT_MODEL, Settings, is_local, missing_api_key
+from interview_prep.llm import local_model_id, local_server_problem
 from interview_prep.pipeline import BatchReport, run_batch
 
 st.set_page_config(page_title="Interview Prep Agent", page_icon="🎯", layout="wide")
@@ -23,10 +24,28 @@ base = Settings()
 # --------------------------------------------------------------------------- #
 with st.sidebar:
     st.header("Settings")
-    model = st.text_input("Model", base.model, help="Any CrewAI-supported model, e.g. gemini/gemini-2.5-flash "
-                                                    "or anthropic/claude-sonnet-5-5")
-    if key_var := missing_api_key(model):
-        st.error(f"{key_var} is not set. Add it to your .env file (only cached videos will work).")
+    choices = ["Cloud model", "Local model (LM Studio)"]
+    engine = st.radio("AI model", choices, index=1 if is_local(base.model) else 0, horizontal=True)
+    fallback = ""
+    if engine == choices[0]:
+        cloud_default = DEFAULT_MODEL if is_local(base.model) else base.model
+        model = st.text_input("Cloud model", cloud_default,
+                              help="Any CrewAI-supported model, e.g. gemini/gemini-2.5-flash "
+                                   "or anthropic/claude-sonnet-5-5")
+        if key_var := missing_api_key(model):
+            st.error(f"{key_var} is not set. Add it to your .env file (only cached videos will work).")
+        if st.checkbox("If the daily quota runs out, continue with the local model", bool(base.fallback_model),
+                       help="Switches to LM Studio for the rest of the run instead of failing."):
+            fallback = "local"
+    else:
+        model = "local"
+    if is_local(model) or fallback:
+        if problem := local_server_problem(base):
+            st.error(problem)
+        else:
+            st.success(f"Local model ready: {local_model_id(base, 'local')}")
+            st.caption("Local runs are slower (a 30-minute video can take 20+ minutes). Videos with no "
+                       "subtitles still need Gemini, because a text model can't listen to audio.")
     st.caption("Always saved: .txt files (short, detailed, Q&A)")
     exp_md = st.checkbox("Markdown (.md)", "md" in base.exports)
     exp_pdf = st.checkbox("PDF study guide", "pdf" in base.exports)
@@ -49,6 +68,7 @@ with st.sidebar:
 
 settings = base.with_overrides(
     model=model,
+    fallback_model=fallback,
     exports=tuple(x for x, on in [("md", exp_md), ("pdf", exp_pdf), ("notion", exp_notion)] if on),
     subtitle_languages=tuple(x.strip() for x in langs.split(",") if x.strip()) or ("hi",),
     transcribe_fallback=transcribe,

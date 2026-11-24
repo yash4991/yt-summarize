@@ -10,16 +10,17 @@ as topic context, keeping the [mm:ss] markers so timestamps keep working.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
+from .config import Settings
+from .llm import make_llm
 from .models import Transcript, VideoMeta, language_name
 from .retry import with_retry
 from .youtube import parse_marked_lines, split_blocks, timestamped_text
 
 log = logging.getLogger(__name__)
-
-MAX_PARALLEL = 4
 
 CLEANUP_RULES = """\
 Rewrite it as clear, correct English:
@@ -57,15 +58,22 @@ class TranslationError(RuntimeError):
     pass
 
 
-def _call_llm(model: str, prompt: str) -> tuple[str, int]:
-    from crewai import LLM
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
-    from .crew.summary_crew import MAX_OUTPUT_TOKENS
 
-    llm = LLM(model=model, temperature=0.1, max_tokens=MAX_OUTPUT_TOKENS)
-    text = llm.call([{"role": "user", "content": prompt}])
-    usage = getattr(llm, "_token_usage", None) or {}
-    return str(text or ""), int(usage.get("total_tokens", 0))
+def strip_reasoning(text: str) -> str:
+    """Some local models put their hidden reasoning in <think> tags inside the answer."""
+    return _THINK_RE.sub("", text or "")
+
+
+def make_llm_call(settings: Settings) -> Callable[[str, str], tuple[str, int]]:
+    def call(model: str, prompt: str) -> tuple[str, int]:
+        llm = make_llm(settings, model, temperature=0.1)
+        text = llm.call([{"role": "user", "content": prompt}])
+        usage = getattr(llm, "_token_usage", None) or {}
+        return strip_reasoning(str(text or "")), int(usage.get("total_tokens", 0))
+
+    return call
 
 
 def translate_transcript(
@@ -74,9 +82,12 @@ def translate_transcript(
     model: str,
     chunk_chars: int = 15000,
     progress: Callable[[str], None] = lambda m: None,
-    llm_call: Callable[[str, str], tuple[str, int]] = _call_llm,
+    llm_call: Callable[[str, str], tuple[str, int]] | None = None,
+    settings: Settings | None = None,
+    parallel: int = 4,
 ) -> tuple[Transcript, int]:
     """Return (English transcript, tokens used)."""
+    llm_call = llm_call or make_llm_call(settings or Settings())
     source_text = timestamped_text(transcript.segments)
     chunks = split_blocks(source_text, chunk_chars)
     language = language_name(transcript.language_code)
@@ -104,7 +115,7 @@ def translate_transcript(
             return text, tokens
         raise TranslationError(f"Could not translate part {i} of the subtitles into the expected format.")
 
-    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(chunks))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(chunks)))) as pool:
         results = list(pool.map(lambda a: work(*a), enumerate(chunks, 1)))
 
     segments = parse_marked_lines("\n".join(text for text, _ in results))

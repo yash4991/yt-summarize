@@ -27,8 +27,9 @@ from . import render
 from .cache import Cache, dump_json
 from .config import PROMPT_VERSION, Settings
 from .exporters import export_notion, export_pdf
+from .llm import model_key
 from .models import RunStats, StudyPack, Transcript, VideoMeta, VideoResult
-from .retry import with_retry
+from .retry import QuotaExceeded, with_retry
 from .storage import atomic_write_text, safe_name, video_folder
 from .transcribe import transcribe_video
 from .translate import translate_transcript
@@ -57,8 +58,10 @@ class PrepState(BaseModel):
     english: Transcript | None = None  # what the agents read
     transcript_note: str = ""
     prep_tokens: int = 0
-    llm_text: str = ""
+    full_text: str = ""  # timestamped English transcript
+    llm_text: str = ""  # what the crew reads (condensed if too long for the model)
     condensed: bool = False
+    fallback_from: str = ""  # set when the main model's quota ran out and we switched
     pack: StudyPack | None = None
     stats: RunStats | None = None
     result: VideoResult | None = None
@@ -88,8 +91,7 @@ def run_crew(settings: Settings, meta: VideoMeta, llm_text: str, progress: Progr
             "transcript_note": transcript_note,
         }
         out = with_retry(
-            lambda inputs=inputs: SummaryCrew(model=settings.model, verbose=settings.verbose)
-            .crew().kickoff(inputs=inputs),
+            lambda inputs=inputs: SummaryCrew(settings).crew().kickoff(inputs=inputs),
             "the summaries", progress)
         _add_usage(stats, out.token_usage)
         results = [t.pydantic for t in out.tasks_output]
@@ -160,24 +162,54 @@ class InterviewPrepFlow(Flow[PrepState]):
 
     @listen(load_video)
     def prepare_transcript(self) -> None:
-        s, cfg = self.state, self._settings
+        s = self.state
         s.english = self._english_transcript()
         if s.english.translated_from or s.english.source == "ai_transcription":
             s.transcript_note = (
                 f"NOTE: this transcript was produced from {s.english.describe()}. It was cleaned up, but a few "
                 "words may still be wrong. Rely on the technical meaning that fits the topic, not on odd wording."
             )
-        text = timestamped_text(s.english.segments)
-        if len(text) > cfg.max_transcript_chars:
-            from .crew import condense_chunk
+        s.full_text = timestamped_text(s.english.segments)
 
-            chunks = split_blocks(text, cfg.chunk_chars)
-            notes = []
-            for i, chunk in enumerate(chunks, 1):
-                self._progress(f"Long video: condensing part {i}/{len(chunks)}...")
-                notes.append(condense_chunk(cfg.model, chunk, i, len(chunks)))
-            text, s.condensed = "\n".join(notes), True
-        s.llm_text = text
+    # ------------------------------------------------------------------ #
+    # Helpers
+
+    def _key(self, model: str | None = None) -> str:
+        """Model name used in cache keys and reports ('local' resolves to the actual local model)."""
+        return model_key(self._settings, model)
+
+    def _with_fallback[T](self, what: str, fn: Callable[[], T]) -> T:
+        """Run ``fn``; if the main model's daily quota is used up, switch to FALLBACK_MODEL and retry.
+        The switch is kept for the rest of the run, so later videos don't hit the same wall."""
+        cfg = self._settings
+        try:
+            return fn()
+        except QuotaExceeded as e:
+            fallback = cfg.fallback_model
+            if not fallback or fallback == cfg.model:
+                raise
+            self._progress(f"{e} Switching to the fallback model ({fallback}) for {what} and the rest of this run.")
+            self.state.fallback_from = self.state.fallback_from or cfg.model
+            cfg.model = fallback
+            return fn()
+
+    def _fit_text(self, model: str) -> str:
+        """The transcript, condensed chunk by chunk if it is too long for this model's context."""
+        s, cfg = self.state, self._settings
+        limits = cfg.limits(model)
+        if len(s.full_text) <= limits.max_transcript_chars:
+            s.condensed = False
+            return s.full_text
+        from .crew import condense_chunk
+
+        chunks = split_blocks(s.full_text, limits.chunk_chars)
+        notes = []
+        for i, chunk in enumerate(chunks, 1):
+            self._progress(f"Long transcript for this model: condensing part {i}/{len(chunks)}...")
+            notes.append(with_retry(lambda c=chunk, i=i: condense_chunk(cfg, model, c, i, len(chunks)),
+                                    f"condensing part {i}", self._progress))
+        s.condensed = True
+        return "\n".join(notes)
 
     def _english_transcript(self) -> Transcript:
         """English subtitles as-is; otherwise translate them, or transcribe the audio if there are none."""
@@ -186,39 +218,58 @@ class InterviewPrepFlow(Flow[PrepState]):
             return s.transcript
         if s.transcript is None and not cfg.transcribe_fallback:
             raise SubtitlesNotFound(
-                f"“{s.meta.title}” has no subtitles. Enable TRANSCRIBE_FALLBACK to let Gemini transcribe it."
+                f"\u201c{s.meta.title}\u201d has no subtitles. Enable TRANSCRIBE_FALLBACK to let Gemini transcribe it."
             )
-        # Translations / transcriptions are cached per model, so they are only paid for once.
-        model = cfg.model if s.transcript is not None else cfg.transcribe_model
-        cached = None if s.force else self.cache.get_english(s.meta.video_id, model, PROMPT_VERSION)
-        if cached:
-            self._progress("Using cached English transcript.")
-            return cached
-        if s.transcript is not None:
-            english, s.prep_tokens = translate_transcript(
-                s.transcript, s.meta, cfg.model, chunk_chars=cfg.translate_chunk_chars, progress=self._progress)
+        if not s.force:
+            # Any model's translation will do: it is just English text, and reusing it saves time and quota.
+            cached = self.cache.find_english(s.meta.video_id, PROMPT_VERSION)
+            if cached:
+                self._progress("Using cached English transcript.")
+                return cached
+        if s.transcript is None:
+            try:
+                english, s.prep_tokens = transcribe_video(
+                    s.meta, cfg.transcribe_model, cfg.transcribe_window_seconds, progress=self._progress)
+            except QuotaExceeded as e:
+                raise QuotaExceeded(f"{e} (Videos without subtitles need Gemini: a local text model can't "
+                                    "listen to audio.)") from e
+            self.cache.put_english(s.meta.video_id, cfg.transcribe_model, PROMPT_VERSION, english)
         else:
-            english, s.prep_tokens = transcribe_video(
-                s.meta, cfg.transcribe_model, cfg.transcribe_window_seconds, progress=self._progress)
+            def translate() -> Transcript:
+                model = cfg.model
+                limits = cfg.limits(model)
+                english, s.prep_tokens = translate_transcript(
+                    s.transcript, s.meta, model, chunk_chars=limits.translate_chunk_chars,
+                    progress=self._progress, settings=cfg, parallel=limits.parallel)
+                self.cache.put_english(s.meta.video_id, self._key(model), PROMPT_VERSION, english)
+                return english
+
+            english = self._with_fallback("translation", translate)
         self._progress(f"English transcript ready ({len(english.segments)} passages).")
-        self.cache.put_english(s.meta.video_id, model, PROMPT_VERSION, english)
         return english
+
+    # ------------------------------------------------------------------ #
 
     @listen(prepare_transcript)
     def generate_pack(self) -> None:
+        self._with_fallback("the summaries", self._generate_with_current_model)
+
+    def _generate_with_current_model(self) -> None:
         s, cfg = self.state, self._settings
-        cached = None if s.force else self.cache.get_pack(s.meta.video_id, cfg.model, PROMPT_VERSION)
+        key = self._key(cfg.model)
+        cached = None if s.force else self.cache.get_pack(s.meta.video_id, key, PROMPT_VERSION)
         if cached:
             self._progress("Using cached study pack (no LLM cost).")
             s.pack = cached.pack
             s.stats = cached.stats.model_copy(update={"from_cache": True, "seconds": 0.0})
             return
+        s.llm_text = self._fit_text(cfg.model)
         t0 = time.perf_counter()
         s.pack, stats = self._crew_runner(cfg, s.meta, s.llm_text, self._progress,
                                           transcript_note=s.transcript_note)
         stats.seconds = round(time.perf_counter() - t0, 1)
         # The cache key must match the lookup above, whatever the runner reported.
-        stats.model, stats.prompt_version = cfg.model, PROMPT_VERSION
+        stats.model, stats.prompt_version = key, PROMPT_VERSION
         stats.transcript_prep_tokens = s.prep_tokens
         s.stats = stats
         self.cache.put_pack(s.meta.video_id, s.pack, stats)
@@ -285,6 +336,7 @@ class InterviewPrepFlow(Flow[PrepState]):
                 "condensed_for_length": s.condensed,
             },
             "run": s.stats.model_dump(),
+            "fallback_from": s.fallback_from or None,
             "quality": {**pack.review.model_dump(), "overall": pack.review.overall, "revisions": pack.revisions},
             "files": [Path(f).name for f in result.files],
             "notion_url": notion_url,
